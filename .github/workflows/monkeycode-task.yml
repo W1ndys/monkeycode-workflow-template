@@ -7,8 +7,9 @@ on:
       - labeled
 
 permissions:
-  contents: read
+  contents: write
   issues: write
+  pull-requests: write
 
 concurrency:
   group: monkeycode-issue-${{ github.event.issue.number }}
@@ -24,7 +25,41 @@ jobs:
        (github.event.action == 'labeled' && github.event.label.name == 'monkeycode'))
 
     steps:
+      - name: 校验 Issue 提交者权限
+        id: check_permission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          permission="$(
+            gh api "repos/${REPOSITORY}/collaborators/${ISSUE_AUTHOR}/permission" \
+              --jq '.permission' 2>/dev/null || echo "none"
+          )"
+          echo "permission=$permission" >> "$GITHUB_OUTPUT"
+          echo "User '${ISSUE_AUTHOR}' permission level: ${permission}"
+
+          # admin/maintain/write 视为有权限（triage 仅能管理标签，不能推送代码，不予授权）
+          case "$permission" in
+            admin|maintain|write)
+              echo "authorized=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "authorized=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::User '${ISSUE_AUTHOR}' (permission: ${permission}) is not authorized to trigger MonkeyCode tasks"
+              # 移除 monkeycode 标签
+              gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/labels/monkeycode" \
+                -X DELETE 2>/dev/null || true
+              # 评论提示
+              gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+                -X POST \
+                -f body="抱歉，只有仓库协作者（write 及以上权限）才能提交 MonkeyCode 开发任务。\`monkeycode\` 标签已被自动移除。如有需要，请联系仓库管理员。"
+              ;;
+          esac
+
       - name: 检查已有 MonkeyCode 任务评论
+        if: steps.check_permission.outputs.authorized == 'true'
         id: find_existing
         env:
           GH_TOKEN: ${{ github.token }}
@@ -35,45 +70,41 @@ jobs:
               --paginate \
               --jq 'any(.[]; (.body // "") | contains("https://monkeycode-ai.com/console/task/"))'
           )"
-
           echo "exists=$exists" >> "$GITHUB_OUTPUT"
 
       - name: 评论检测标记
-        if: steps.find_existing.outputs.exists != 'true'
+        if: steps.check_permission.outputs.authorized == 'true' && steps.find_existing.outputs.exists != 'true'
+        id: init_comment
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPOSITORY: ${{ github.repository }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPOSITORY" --body "检测到 Issue #${ISSUE_NUMBER}「${ISSUE_TITLE}」带有 \`monkeycode\` 标签，MonkeyCode 自动开发工作流已触发，正在准备创建任务..."
+          comment_url="$(
+            gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+              -X POST \
+              -f body="检测到 Issue #${ISSUE_NUMBER}「${ISSUE_TITLE}」带有 \`monkeycode\` 标签，MonkeyCode 自动开发工作流已触发，正在准备创建任务..." \
+              --jq '.url'
+          )"
+          echo "comment_url=$comment_url" >> "$GITHUB_OUTPUT"
 
       - name: 校验配置
-        if: steps.find_existing.outputs.exists != 'true'
+        if: steps.check_permission.outputs.authorized == 'true' && steps.find_existing.outputs.exists != 'true'
         id: check_config
         env:
-          MONKEYCODE_COOKIE: ${{ secrets.MONKEYCODE_COOKIE }}
+          MONKEYCODE_EMAIL: ${{ secrets.MONKEYCODE_EMAIL }}
+          MONKEYCODE_PASSWORD: ${{ secrets.MONKEYCODE_PASSWORD }}
           MONKEYCODE_MODEL_ID: ${{ vars.MONKEYCODE_MODEL_ID }}
           MONKEYCODE_IMAGE_ID: ${{ vars.MONKEYCODE_IMAGE_ID }}
           MONKEYCODE_PROJECT_ID: ${{ vars.MONKEYCODE_PROJECT_ID }}
         run: |
           missing=()
-
-          if [ -z "$MONKEYCODE_COOKIE" ]; then
-            missing+=("MONKEYCODE_COOKIE secret")
-          fi
-
-          if [ -z "$MONKEYCODE_MODEL_ID" ]; then
-            missing+=("MONKEYCODE_MODEL_ID variable")
-          fi
-
-          if [ -z "$MONKEYCODE_IMAGE_ID" ]; then
-            missing+=("MONKEYCODE_IMAGE_ID variable")
-          fi
-
-          if [ -z "$MONKEYCODE_PROJECT_ID" ]; then
-            missing+=("MONKEYCODE_PROJECT_ID variable")
-          fi
+          [ -z "$MONKEYCODE_EMAIL" ] && missing+=("MONKEYCODE_EMAIL secret")
+          [ -z "$MONKEYCODE_PASSWORD" ] && missing+=("MONKEYCODE_PASSWORD secret")
+          [ -z "$MONKEYCODE_MODEL_ID" ] && missing+=("MONKEYCODE_MODEL_ID variable")
+          [ -z "$MONKEYCODE_IMAGE_ID" ] && missing+=("MONKEYCODE_IMAGE_ID variable")
+          [ -z "$MONKEYCODE_PROJECT_ID" ] && missing+=("MONKEYCODE_PROJECT_ID variable")
 
           if [ "${#missing[@]}" -gt 0 ]; then
             printf 'missing=%s\n' "${missing[*]}" >> "$GITHUB_OUTPUT"
@@ -81,63 +112,79 @@ jobs:
             exit 1
           fi
 
-      - name: 检测 MonkeyCode Cookie
-        if: steps.find_existing.outputs.exists != 'true'
-        id: check_cookie
+      - name: 检出仓库代码
+        if: steps.check_permission.outputs.authorized == 'true' && steps.find_existing.outputs.exists != 'true'
+        uses: actions/checkout@v4
+
+      - name: MonkeyCode 自动登录
+        if: steps.check_permission.outputs.authorized == 'true' && steps.find_existing.outputs.exists != 'true'
+        id: login
         env:
-          MONKEYCODE_COOKIE: ${{ secrets.MONKEYCODE_COOKIE }}
+          MONKEYCODE_EMAIL: ${{ secrets.MONKEYCODE_EMAIL }}
+          MONKEYCODE_PASSWORD: ${{ secrets.MONKEYCODE_PASSWORD }}
         run: |
-          set +e
+          python3 .github/scripts/monkeycode_login.py
 
-          response_file="$(mktemp)"
-          status="$(
-            curl -sS \
-              -o "$response_file" \
-              -w "%{http_code}" \
-              "https://monkeycode-ai.com/api/v1/users/subscription" \
-              -H "accept: */*" \
-              -H "content-type: application/json" \
-              -b "$MONKEYCODE_COOKIE"
-          )"
-          curl_exit=$?
-          response="$(cat "$response_file")"
-          rm -f "$response_file"
+      - name: 自动创建关联 PR
+        if: steps.check_permission.outputs.authorized == 'true' && steps.find_existing.outputs.exists != 'true' && steps.login.outputs.login_success == 'true'
+        id: create_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          branch_name="monkeycode/issue-${ISSUE_NUMBER}"
 
-          code="$(printf '%s' "$response" | jq -r '.code // empty' 2>/dev/null)"
-          message="$(printf '%s' "$response" | jq -r '.message // empty' 2>/dev/null)"
-          plan="$(printf '%s' "$response" | jq -r '.data.plan // empty' 2>/dev/null)"
-          expires_at="$(printf '%s' "$response" | jq -r '.data.expires_at // empty' 2>/dev/null)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          {
-            echo "http_status=$status"
-            echo "curl_exit=$curl_exit"
-            echo "monkeycode_code=$code"
-            echo "monkeycode_message=$message"
-            echo "plan=$plan"
-            echo "expires_at=$expires_at"
-          } >> "$GITHUB_OUTPUT"
-
-          if [ "$curl_exit" -ne 0 ]; then
-            exit 1
+          # 检查远程分支是否已存在
+          if git ls-remote --exit-code origin "refs/heads/${branch_name}" >/dev/null 2>&1; then
+            git fetch origin "$branch_name"
+            git checkout "$branch_name"
+          else
+            git checkout -b "$branch_name"
+            git commit --allow-empty -m "chore: init branch for issue #${ISSUE_NUMBER}"
+            git push -u origin "$branch_name"
           fi
 
-          if [ "$status" = "401" ] || printf '%s' "$response" | grep -qi 'Unauthorized'; then
-            echo "unauthorized=true" >> "$GITHUB_OUTPUT"
-            exit 1
+          echo "branch_name=$branch_name" >> "$GITHUB_OUTPUT"
+
+          # 检查是否已有关联 PR
+          existing_pr="$(gh pr list --head "$branch_name" --state open --json url --jq '.[0].url // empty')"
+          if [ -n "$existing_pr" ]; then
+            echo "pr_url=$existing_pr" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          if [ "$code" != "0" ]; then
-            exit 1
+          # 尝试创建 PR，失败时记录错误但不终止流程
+          pr_error_file="$(mktemp)"
+          if pr_url="$(gh pr create \
+            --title "MonkeyCode: ${ISSUE_TITLE}" \
+            --body "$(printf '## 关联 Issue\n\nCloses #%s\n\n---\n\n> 此 PR 由 MonkeyCode 自动开发工作流创建，开发任务进行中...' "$ISSUE_NUMBER")" \
+            --head "$branch_name" \
+            --base main 2>"$pr_error_file")"; then
+            echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          else
+            pr_error="$(cat "$pr_error_file")"
+            echo "pr_create_failed=true" >> "$GITHUB_OUTPUT"
+            echo "pr_error=$pr_error" >> "$GITHUB_OUTPUT"
+            echo "::warning::PR 创建失败: $pr_error"
           fi
-
-          printf 'MonkeyCode Cookie 可用，订阅：%s，到期：%s\n' "$plan" "$expires_at" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 创建 MonkeyCode 开发任务
-        if: steps.find_existing.outputs.exists != 'true' && steps.check_cookie.outcome == 'success'
+        if: >
+          steps.check_permission.outputs.authorized == 'true' &&
+          steps.find_existing.outputs.exists != 'true' &&
+          steps.login.outputs.login_success == 'true'
         id: create_task
         env:
           ISSUE_URL: ${{ github.event.issue.html_url }}
-          MONKEYCODE_COOKIE: ${{ secrets.MONKEYCODE_COOKIE }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          PR_URL: ${{ steps.create_pr.outputs.pr_url }}
+          BRANCH_NAME: ${{ steps.create_pr.outputs.branch_name }}
+          COOKIE_FILE: ${{ steps.login.outputs.cookie_file }}
           MONKEYCODE_MODEL_ID: ${{ vars.MONKEYCODE_MODEL_ID }}
           MONKEYCODE_IMAGE_ID: ${{ vars.MONKEYCODE_IMAGE_ID }}
           MONKEYCODE_PROJECT_ID: ${{ vars.MONKEYCODE_PROJECT_ID }}
@@ -145,13 +192,32 @@ jobs:
         run: |
           set +e
 
-          # 支持自定义 prompt，未配置时使用默认模板
-          # 默认 prompt 中的 commit 作者信息请根据实际情况修改
           if [ -n "$MONKEYCODE_TASK_PROMPT" ]; then
-            content="${MONKEYCODE_TASK_PROMPT}，issues链接为${ISSUE_URL}"
+            task_instruction="$MONKEYCODE_TASK_PROMPT"
           else
-            content="新开一个分支完成这个任务，完成之后提交推送并发起pr，请直接在修改代码之前发起PR，然后再每次提交直接提交推送到PR，开发任务完成之后自己进行一次review，issues链接为${ISSUE_URL}"
+            task_instruction="$(cat .github/prompts/task-instruction.md)"
           fi
+
+          pr_section=""
+          if [ -n "$PR_URL" ]; then
+            pr_section="$PR_URL"
+          elif [ -n "$BRANCH_NAME" ]; then
+            pr_section="PR 自动创建失败（可能需要开启仓库权限），请在分支 ${BRANCH_NAME} 上开发，手动创建 PR。"
+          else
+            pr_section="无"
+          fi
+
+          # 使用 jq --arg 安全拼接 content，避免 ISSUE_BODY 中特殊字符导致问题
+          content="$(
+            jq -cn \
+              --arg task_instruction "$task_instruction" \
+              --arg issue_title "$ISSUE_TITLE" \
+              --arg issue_body "$ISSUE_BODY" \
+              --arg pr_section "$pr_section" \
+              --arg issue_url "$ISSUE_URL" \
+              '"## 任务说明\n" + $task_instruction + "\n\n### issues 标题\n" + $issue_title + "\n\n### issues 内容\n" + $issue_body + "\n\n### 关联的 PR\n" + $pr_section + "\n\n### 关联的 issues\n" + $issue_url' \
+            | jq -r '.'
+          )"
 
           payload="$(
             jq -cn \
@@ -165,17 +231,9 @@ jobs:
                 model_id: $model_id,
                 image_id: $image_id,
                 host_id: "public_host",
-                repo: {
-                  branch: "main"
-                },
-                resource: {
-                  core: 2,
-                  memory: 8589934592,
-                  life: 7200
-                },
-                extra: {
-                  project_id: $project_id
-                },
+                repo: { branch: "main" },
+                resource: { core: 2, memory: 8589934592, life: 7200 },
+                extra: { project_id: $project_id },
                 task_type: "develop"
               }'
           )"
@@ -188,8 +246,7 @@ jobs:
               -X POST "https://monkeycode-ai.com/api/v1/users/tasks" \
               -H "accept: */*" \
               -H "content-type: application/json" \
-              -H "origin: https://monkeycode-ai.com" \
-              -b "$MONKEYCODE_COOKIE" \
+              -b "$COOKIE_FILE" \
               --data-raw "$payload"
           )"
           curl_exit=$?
@@ -207,99 +264,84 @@ jobs:
             echo "monkeycode_message=$message"
           } >> "$GITHUB_OUTPUT"
 
-          if [ "$curl_exit" -ne 0 ]; then
-            exit 1
-          fi
-
+          if [ "$curl_exit" -ne 0 ]; then exit 1; fi
           if [ "$status" = "401" ] || printf '%s' "$response" | grep -qi 'Unauthorized'; then
             echo "unauthorized=true" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-
-          if [ "$code" != "0" ] || [ -z "$task_id" ]; then
-            exit 1
-          fi
+          if [ "$code" != "0" ] || [ -z "$task_id" ]; then exit 1; fi
 
           task_url="https://monkeycode-ai.com/console/task/${task_id}"
           echo "task_url=$task_url" >> "$GITHUB_OUTPUT"
 
-      - name: 评论任务链接
-        if: success() && steps.find_existing.outputs.exists != 'true'
+      - name: 编辑原评论为任务链接
+        if: steps.check_permission.outputs.authorized == 'true' && steps.find_existing.outputs.exists != 'true' && steps.create_task.outputs.task_url != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          REPOSITORY: ${{ github.repository }}
+          COMMENT_URL: ${{ steps.init_comment.outputs.comment_url }}
           TASK_URL: ${{ steps.create_task.outputs.task_url }}
+          PR_URL: ${{ steps.create_pr.outputs.pr_url }}
+          PR_CREATE_FAILED: ${{ steps.create_pr.outputs.pr_create_failed }}
+          BRANCH_NAME: ${{ steps.create_pr.outputs.branch_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPOSITORY" --body "MonkeyCode 开发任务已开始执行，详情请查看：${TASK_URL}"
+          pr_line=""
+          if [ -n "$PR_URL" ]; then
+            pr_line="- 关联 PR：${PR_URL}"
+          elif [ "$PR_CREATE_FAILED" = "true" ]; then
+            pr_line="- 关联 PR：自动创建失败（请在仓库 Settings > Actions > General 中勾选 \"Allow GitHub Actions to create and approve pull requests\"），分支 \`${BRANCH_NAME}\` 已就绪"
+          fi
 
-      - name: 评论 Cookie 过期
+          gh api "$COMMENT_URL" \
+            -X PATCH \
+            -f body="$(printf 'MonkeyCode 开发任务已创建\n\n- 任务详情：%s\n%s\n- Issue：#%s「%s」' \
+              "$TASK_URL" "$pr_line" "$ISSUE_NUMBER" "$ISSUE_TITLE")"
+
+      - name: 编辑原评论为登录失败
         if: >
           failure() &&
           steps.check_config.outcome == 'success' &&
-          ((steps.check_cookie.outcome == 'failure' && steps.check_cookie.outputs.unauthorized == 'true') ||
-           (steps.create_task.outcome == 'failure' && steps.create_task.outputs.unauthorized == 'true'))
+          steps.login.outcome == 'failure' &&
+          steps.init_comment.outputs.comment_url != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          REPOSITORY: ${{ github.repository }}
+          COMMENT_URL: ${{ steps.init_comment.outputs.comment_url }}
+          LOGIN_ERROR: ${{ steps.login.outputs.login_error }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPOSITORY" --body "MonkeyCode 创建任务失败：Cookie 已过期，请重新抓取并更新仓库 Secret \`MONKEYCODE_COOKIE\`。"
+          gh api "$COMMENT_URL" \
+            -X PATCH \
+            -f body="$(printf 'MonkeyCode 创建任务失败：自动登录失败，请检查 `MONKEYCODE_EMAIL` 和 `MONKEYCODE_PASSWORD` 配置是否正确。\n\n错误信息：%s' \
+              "${LOGIN_ERROR:-未知}")"
 
-      - name: 评论配置缺失
-        if: failure() && steps.check_config.outcome == 'failure'
+      - name: 编辑原评论为配置缺失
+        if: failure() && steps.check_config.outcome == 'failure' && steps.init_comment.outputs.comment_url != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          REPOSITORY: ${{ github.repository }}
+          COMMENT_URL: ${{ steps.init_comment.outputs.comment_url }}
           MISSING_CONFIG: ${{ steps.check_config.outputs.missing }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPOSITORY" --body "MonkeyCode 创建任务失败：仓库缺少配置 ${MISSING_CONFIG}。请补齐后重新添加 \`monkeycode\` 标签触发。"
+          gh api "$COMMENT_URL" \
+            -X PATCH \
+            -f body="$(printf 'MonkeyCode 创建任务失败：仓库缺少配置 %s。\n\n请补齐后重新添加 `monkeycode` 标签触发。' \
+              "$MISSING_CONFIG")"
 
-      - name: 评论 Cookie 检测失败
-        if: failure() && steps.check_config.outcome == 'success' && steps.check_cookie.outcome == 'failure' && steps.check_cookie.outputs.unauthorized != 'true'
+      - name: 编辑原评论为创建失败
+        if: >
+          failure() &&
+          steps.check_config.outcome == 'success' &&
+          steps.login.outcome == 'success' &&
+          steps.create_task.outcome == 'failure' &&
+          steps.init_comment.outputs.comment_url != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          REPOSITORY: ${{ github.repository }}
-          HTTP_STATUS: ${{ steps.check_cookie.outputs.http_status }}
-          CURL_EXIT: ${{ steps.check_cookie.outputs.curl_exit }}
-          MONKEYCODE_CODE: ${{ steps.check_cookie.outputs.monkeycode_code }}
-          MONKEYCODE_MESSAGE: ${{ steps.check_cookie.outputs.monkeycode_message }}
-        run: |
-          body="$(
-            cat <<EOF
-          MonkeyCode Cookie 检测失败，请检查 workflow 日志。
-
-          HTTP 状态码：${HTTP_STATUS:-未获取}
-          curl 退出码：${CURL_EXIT:-未获取}
-          MonkeyCode code：${MONKEYCODE_CODE:-未获取}
-          MonkeyCode message：${MONKEYCODE_MESSAGE:-未获取}
-          EOF
-          )"
-
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPOSITORY" --body "$body"
-
-      - name: 评论创建失败
-        if: failure() && steps.check_config.outcome == 'success' && steps.create_task.outcome == 'failure' && steps.create_task.outputs.unauthorized != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          REPOSITORY: ${{ github.repository }}
+          COMMENT_URL: ${{ steps.init_comment.outputs.comment_url }}
           HTTP_STATUS: ${{ steps.create_task.outputs.http_status }}
           CURL_EXIT: ${{ steps.create_task.outputs.curl_exit }}
           MONKEYCODE_CODE: ${{ steps.create_task.outputs.monkeycode_code }}
           MONKEYCODE_MESSAGE: ${{ steps.create_task.outputs.monkeycode_message }}
         run: |
-          body="$(
-            cat <<EOF
-          MonkeyCode 创建任务失败，请检查 workflow 日志。
-
-          HTTP 状态码：${HTTP_STATUS:-未获取}
-          curl 退出码：${CURL_EXIT:-未获取}
-          MonkeyCode code：${MONKEYCODE_CODE:-未获取}
-          MonkeyCode message：${MONKEYCODE_MESSAGE:-未获取}
-          EOF
-          )"
-
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPOSITORY" --body "$body"
+          gh api "$COMMENT_URL" \
+            -X PATCH \
+            -f body="$(printf 'MonkeyCode 创建任务失败，请检查 workflow 日志。\n\n- HTTP 状态码：%s\n- curl 退出码：%s\n- MonkeyCode code：%s\n- MonkeyCode message：%s' \
+              "${HTTP_STATUS:-未获取}" "${CURL_EXIT:-未获取}" "${MONKEYCODE_CODE:-未获取}" "${MONKEYCODE_MESSAGE:-未获取}")"
