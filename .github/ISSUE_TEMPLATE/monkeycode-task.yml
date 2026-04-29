@@ -1,0 +1,25 @@
+name: MonkeyCode 开发任务
+description: 提交一个由 MonkeyCode 自动处理的开发任务
+title: "[MonkeyCode] "
+labels:
+  - monkeycode
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## MonkeyCode 开发任务
+        请在上方 Issue 标题栏填写任务标题（`[MonkeyCode]` 前缀后补充即可），然后在下方详细描述需求。
+        提交后将自动触发 MonkeyCode 工作流进行开发。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 需求描述
+      description: 详细描述需求内容、期望行为和验收标准
+      placeholder: |
+        请描述：
+        1. 当前存在的问题或需要实现的功能
+        2. 期望的行为或效果
+        3. 其他补充说明（可选）
+    validations:
+      required: true

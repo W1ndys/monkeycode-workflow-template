@@ -6,8 +6,9 @@ on:
       - closed
 
 permissions:
-  contents: read
+  contents: write
   issues: write
+  pull-requests: write
 
 jobs:
   stop-task:
@@ -34,11 +35,10 @@ jobs:
           fi
 
           echo "issue_number=$issue_number" >> "$GITHUB_OUTPUT"
-          echo "关联 Issue: #$issue_number"
 
-      - name: 从 Issue 评论提取任务 ID
+      - name: 从 Issue 评论提取开发任务 ID
         if: steps.extract_issue.outputs.skip != 'true'
-        id: extract_task
+        id: extract_dev_task
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
@@ -46,54 +46,152 @@ jobs:
           task_id="$(
             gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
               --paginate \
-              --jq '[.[] | select((.body // "") | contains("monkeycode-ai.com/console/task/")) | .body] | last // empty' \
+              --jq '[.[] | select((.body // "") | (contains("monkeycode-ai.com/console/task/") and (contains("[MONKEYCODE_REVIEW_TASK]") | not))) | .body] | last // empty' \
             | grep -oP 'monkeycode-ai\.com/console/task/\K[0-9a-f-]+' \
             | head -1
           )"
 
-          if [ -z "$task_id" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "未找到 MonkeyCode 任务链接，跳过终止流程"
-            exit 0
+          if [ -n "$task_id" ]; then
+            echo "task_id=$task_id" >> "$GITHUB_OUTPUT"
+          else
+            echo "未找到开发任务 ID"
           fi
 
-          echo "task_id=$task_id" >> "$GITHUB_OUTPUT"
-          echo "提取到任务 ID: $task_id"
-
-      - name: 终止 MonkeyCode 任务
-        if: steps.extract_issue.outputs.skip != 'true' && steps.extract_task.outputs.skip != 'true'
-        id: stop_task
+      - name: 从 Issue 评论提取 Review 任务 ID
+        if: steps.extract_issue.outputs.skip != 'true'
+        id: extract_review_task
         env:
-          MONKEYCODE_COOKIE: ${{ secrets.MONKEYCODE_COOKIE }}
-          TASK_ID: ${{ steps.extract_task.outputs.task_id }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
         run: |
-          if [ -z "$MONKEYCODE_COOKIE" ]; then
-            echo "MONKEYCODE_COOKIE 未配置，跳过终止"
-            exit 0
+          task_id="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+              --paginate \
+              --jq '[.[] | select((.body // "") | contains("[MONKEYCODE_REVIEW_TASK]")) | .body] | last // empty' \
+            | grep -oP 'monkeycode-ai\.com/console/task/\K[0-9a-f-]+' \
+            | head -1
+          )"
+
+          if [ -n "$task_id" ]; then
+            echo "task_id=$task_id" >> "$GITHUB_OUTPUT"
+          else
+            echo "未找到 Review 任务 ID"
           fi
 
+      - name: 检出仓库代码
+        if: >
+          steps.extract_issue.outputs.skip != 'true' &&
+          (steps.extract_dev_task.outputs.task_id != '' || steps.extract_review_task.outputs.task_id != '')
+        uses: actions/checkout@v4
+
+      - name: MonkeyCode 自动登录
+        if: >
+          steps.extract_issue.outputs.skip != 'true' &&
+          (steps.extract_dev_task.outputs.task_id != '' || steps.extract_review_task.outputs.task_id != '')
+        id: login
+        env:
+          MONKEYCODE_EMAIL: ${{ secrets.MONKEYCODE_EMAIL }}
+          MONKEYCODE_PASSWORD: ${{ secrets.MONKEYCODE_PASSWORD }}
+        run: |
+          if [ -z "$MONKEYCODE_EMAIL" ] || [ -z "$MONKEYCODE_PASSWORD" ]; then
+            echo "MONKEYCODE_EMAIL 或 MONKEYCODE_PASSWORD 未配置，跳过终止"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 .github/scripts/monkeycode_login.py
+
+      - name: 终止开发任务
+        if: >
+          steps.extract_issue.outputs.skip != 'true' &&
+          steps.extract_dev_task.outputs.task_id != '' &&
+          steps.login.outputs.skip != 'true' &&
+          steps.login.outputs.login_success == 'true'
+        id: stop_dev
+        env:
+          COOKIE_FILE: ${{ steps.login.outputs.cookie_file }}
+          TASK_ID: ${{ steps.extract_dev_task.outputs.task_id }}
+        run: |
           response="$(
             curl -sS \
               -X PUT \
               "https://monkeycode-ai.com/api/v1/users/tasks/stop" \
               -H "accept: */*" \
               -H "content-type: application/json" \
-              -b "$MONKEYCODE_COOKIE" \
+              -b "$COOKIE_FILE" \
               --data-raw "{\"id\":\"${TASK_ID}\"}"
           )"
-
           code="$(printf '%s' "$response" | jq -r '.code // empty' 2>/dev/null)"
-          message="$(printf '%s' "$response" | jq -r '.message // empty' 2>/dev/null)"
-
           if [ "$code" = "0" ]; then
             echo "success=true" >> "$GITHUB_OUTPUT"
-            printf 'MonkeyCode 任务 %s 已成功终止\n' "$TASK_ID" >> "$GITHUB_STEP_SUMMARY"
           else
-            printf 'MonkeyCode 任务终止失败 - code: %s, message: %s\n' "$code" "$message" >> "$GITHUB_STEP_SUMMARY"
+            echo "开发任务终止失败: code=$code"
           fi
 
+      - name: 终止 Review 任务
+        if: >
+          steps.extract_issue.outputs.skip != 'true' &&
+          steps.extract_review_task.outputs.task_id != '' &&
+          steps.login.outputs.skip != 'true' &&
+          steps.login.outputs.login_success == 'true'
+        id: stop_review
+        env:
+          COOKIE_FILE: ${{ steps.login.outputs.cookie_file }}
+          TASK_ID: ${{ steps.extract_review_task.outputs.task_id }}
+        run: |
+          response="$(
+            curl -sS \
+              -X PUT \
+              "https://monkeycode-ai.com/api/v1/users/tasks/stop" \
+              -H "accept: */*" \
+              -H "content-type: application/json" \
+              -b "$COOKIE_FILE" \
+              --data-raw "{\"id\":\"${TASK_ID}\"}"
+          )"
+          code="$(printf '%s' "$response" | jq -r '.code // empty' 2>/dev/null)"
+          if [ "$code" = "0" ]; then
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Review 任务终止失败: code=$code"
+          fi
+
+      - name: 在 PR 下评论终止结果
+        if: steps.extract_issue.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEV_SUCCESS: ${{ steps.stop_dev.outputs.success }}
+          REVIEW_SUCCESS: ${{ steps.stop_review.outputs.success }}
+          DEV_TASK_ID: ${{ steps.extract_dev_task.outputs.task_id }}
+          REVIEW_TASK_ID: ${{ steps.extract_review_task.outputs.task_id }}
+        run: |
+          body="MonkeyCode 任务终止报告\n\n"
+
+          if [ -n "$DEV_TASK_ID" ]; then
+            if [ "$DEV_SUCCESS" = "true" ]; then
+              body="${body}- 开发任务：已成功终止\n"
+            else
+              body="${body}- 开发任务：终止失败，请手动处理\n"
+            fi
+          else
+            body="${body}- 开发任务：未找到关联任务\n"
+          fi
+
+          if [ -n "$REVIEW_TASK_ID" ]; then
+            if [ "$REVIEW_SUCCESS" = "true" ]; then
+              body="${body}- Review 任务：已成功终止\n"
+            else
+              body="${body}- Review 任务：终止失败，请手动处理\n"
+            fi
+          else
+            body="${body}- Review 任务：未找到关联任务\n"
+          fi
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$(printf '%b' "$body")"
+
       - name: 评论并关闭关联 Issue
-        if: steps.extract_issue.outputs.skip != 'true' && steps.stop_task.outputs.success == 'true'
+        if: steps.extract_issue.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
@@ -102,8 +200,22 @@ jobs:
         run: |
           gh issue comment "$ISSUE_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --body "MonkeyCode 开发任务已完成，PR #${PR_NUMBER}（${PR_TITLE}）已合并，本 Issue 自动关闭。"
+            --body "$(printf 'MonkeyCode 开发任务已完成，PR #%s（%s）已合并，相关任务已终止，本 Issue 自动关闭。' \
+              "$PR_NUMBER" "$PR_TITLE")"
 
           gh issue close "$ISSUE_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --reason completed
+
+      - name: 删除关联分支
+        if: steps.extract_issue.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [ "$HEAD_REF" != "main" ] && [ "$HEAD_REF" != "master" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/${HEAD_REF}" \
+              -X DELETE 2>/dev/null \
+              && echo "已删除分支: $HEAD_REF" \
+              || echo "分支删除失败或已不存在: $HEAD_REF"
+          fi

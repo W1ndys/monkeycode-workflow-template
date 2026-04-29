@@ -1,0 +1,173 @@
+name: MonkeyCode 自动 Review
+
+on:
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: monkeycode-review-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  create-review:
+    name: 创建 MonkeyCode Review 任务
+    runs-on: ubuntu-latest
+    if: >
+      !github.event.issue.pull_request &&
+      contains(github.event.issue.labels.*.name, 'monkeycode') &&
+      contains(github.event.comment.body, '[MONKEYCODE_TASK_COMPLETE]')
+
+    steps:
+      - name: 检查是否已有 review 任务
+        id: find_existing_review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          exists="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+              --paginate \
+              --jq 'any(.[]; (.body // "") | contains("[MONKEYCODE_REVIEW_TASK]"))'
+          )"
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+
+      - name: 从 Issue 评论提取 PR 链接
+        if: steps.find_existing_review.outputs.exists != 'true'
+        id: extract_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          pr_url="$(
+            printf '%s' "$COMMENT_BODY" \
+              | grep -oP 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' \
+              | head -1
+          )"
+
+          if [ -z "$pr_url" ]; then
+            pr_url="$(
+              gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+                --paginate \
+                --jq '[.[] | select((.body // "") | test("https://github\\.com/.+/pull/[0-9]+")) | .body] | last // empty' \
+              | grep -oP 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' \
+              | head -1
+            )"
+          fi
+
+          if [ -z "$pr_url" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "未找到关联 PR 链接，跳过 review 任务创建"
+            exit 0
+          fi
+
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+
+      - name: 检出仓库代码
+        if: steps.find_existing_review.outputs.exists != 'true' && steps.extract_pr.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
+      - name: MonkeyCode 自动登录
+        if: steps.find_existing_review.outputs.exists != 'true' && steps.extract_pr.outputs.skip != 'true'
+        id: login
+        env:
+          MONKEYCODE_EMAIL: ${{ secrets.MONKEYCODE_EMAIL }}
+          MONKEYCODE_PASSWORD: ${{ secrets.MONKEYCODE_PASSWORD }}
+        run: |
+          python3 .github/scripts/monkeycode_login.py
+
+      - name: 创建 MonkeyCode Review 任务
+        if: >
+          steps.find_existing_review.outputs.exists != 'true' &&
+          steps.extract_pr.outputs.skip != 'true' &&
+          steps.login.outputs.login_success == 'true'
+        id: create_review_task
+        env:
+          PR_URL: ${{ steps.extract_pr.outputs.pr_url }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          COOKIE_FILE: ${{ steps.login.outputs.cookie_file }}
+          MONKEYCODE_MODEL_ID: ${{ vars.MONKEYCODE_MODEL_ID }}
+          MONKEYCODE_IMAGE_ID: ${{ vars.MONKEYCODE_IMAGE_ID }}
+          MONKEYCODE_PROJECT_ID: ${{ vars.MONKEYCODE_PROJECT_ID }}
+        run: |
+          set +e
+
+          content="$(printf 'review 这个 pr 的提交内容，在 pr 后面发表一个单独评论说明每部分代码的问题和修复建议，并使用合适的 emoji 加强视觉\n\n关联 PR：%s\n关联 Issue：%s\n\n### review 通过的 pr 评论参考格式如下\n\n## Review\n\n代码审查通过/不通过\n\n### 文件名.ext\n- 哪个文件/函数，如何实现的，有什么风险或优点，有什么修改建议\n\n### 构建验证\n- `命令` 通过或不通过，不通过的原因\n- `vite build` 通过，无错误无警告' \
+            "$PR_URL" "$ISSUE_URL"
+          )"
+
+          payload="$(
+            jq -cn \
+              --arg content "$content" \
+              --arg model_id "$MONKEYCODE_MODEL_ID" \
+              --arg image_id "$MONKEYCODE_IMAGE_ID" \
+              --arg project_id "$MONKEYCODE_PROJECT_ID" \
+              '{
+                content: $content,
+                cli_name: "opencode",
+                model_id: $model_id,
+                image_id: $image_id,
+                host_id: "public_host",
+                repo: { branch: "main" },
+                resource: { core: 2, memory: 8589934592, life: 7200 },
+                extra: { project_id: $project_id },
+                task_type: "develop"
+              }'
+          )"
+
+          response_file="$(mktemp)"
+          status="$(
+            curl -sS \
+              -o "$response_file" \
+              -w "%{http_code}" \
+              -X POST "https://monkeycode-ai.com/api/v1/users/tasks" \
+              -H "accept: */*" \
+              -H "content-type: application/json" \
+              -b "$COOKIE_FILE" \
+              --data-raw "$payload"
+          )"
+          curl_exit=$?
+          response="$(cat "$response_file")"
+
+          task_id="$(printf '%s' "$response" | jq -r '.data.id // empty' 2>/dev/null)"
+          code="$(printf '%s' "$response" | jq -r '.code // empty' 2>/dev/null)"
+
+          if [ "$curl_exit" -ne 0 ] || [ "$code" != "0" ] || [ -z "$task_id" ]; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            echo "monkeycode_code=$code" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          task_url="https://monkeycode-ai.com/console/task/${task_id}"
+          echo "task_url=$task_url" >> "$GITHUB_OUTPUT"
+
+      - name: 评论 Review 任务链接
+        if: success() && steps.find_existing_review.outputs.exists != 'true' && steps.extract_pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+          TASK_URL: ${{ steps.create_review_task.outputs.task_url }}
+          PR_URL: ${{ steps.extract_pr.outputs.pr_url }}
+        run: |
+          gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+            -X POST \
+            -f body="$(printf '[MONKEYCODE_REVIEW_TASK]\n\nMonkeyCode Review 任务已创建\n\n- Review 任务详情：%s\n- 关联 PR：%s' \
+              "$TASK_URL" "$PR_URL")"
+
+      - name: 评论 Review 创建失败
+        if: failure() && steps.find_existing_review.outputs.exists != 'true' && steps.extract_pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+            -X POST \
+            -f body="MonkeyCode Review 任务创建失败，请检查 workflow 日志。"
