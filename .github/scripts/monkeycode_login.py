@@ -192,7 +192,8 @@ def save_cookies(cookie_jar: http.cookiejar.CookieJar, path: str) -> None:
         for cookie in cookie_jar:
             secure = "TRUE" if cookie.secure else "FALSE"
             domain_dot = "TRUE" if cookie.domain.startswith(".") else "FALSE"
-            expires = str(cookie.expires) if cookie.expires else "0"
+            # expires 为 None 时设为当前时间 + 1 小时，避免部分 curl 版本将 0 视为 1970 年过期
+            expires = str(cookie.expires) if cookie.expires else str(int(time.time()) + 3600)
             f.write(
                 f"{cookie.domain}\t{domain_dot}\t{cookie.path}\t"
                 f"{secure}\t{expires}\t{cookie.name}\t{cookie.value}\n"

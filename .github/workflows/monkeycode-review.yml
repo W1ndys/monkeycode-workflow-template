@@ -44,10 +44,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           COMMENT_BODY: ${{ github.event.comment.body }}
+          REPOSITORY: ${{ github.repository }}
         run: |
+          # 限定为当前仓库的 PR 链接，避免误匹配其他仓库
+          repo_pattern="https://github\\.com/${REPOSITORY}/pull/[0-9]+"
+
           pr_url="$(
             printf '%s' "$COMMENT_BODY" \
-              | grep -oP 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' \
+              | grep -oP "$repo_pattern" \
               | head -1
           )"
 
@@ -55,8 +59,8 @@ jobs:
             pr_url="$(
               gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
                 --paginate \
-                --jq '[.[] | select((.body // "") | test("https://github\\.com/.+/pull/[0-9]+")) | .body] | last // empty' \
-              | grep -oP 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' \
+                --jq "[.[] | select((.body // \"\") | test(\"$repo_pattern\")) | .body] | last // empty" \
+              | grep -oP "$repo_pattern" \
               | head -1
             )"
           fi
@@ -134,13 +138,21 @@ jobs:
           )"
           curl_exit=$?
           response="$(cat "$response_file")"
+          rm -f "$response_file"
 
           task_id="$(printf '%s' "$response" | jq -r '.data.id // empty' 2>/dev/null)"
           code="$(printf '%s' "$response" | jq -r '.code // empty' 2>/dev/null)"
+          message="$(printf '%s' "$response" | jq -r '.message // empty' 2>/dev/null)"
+
+          {
+            echo "http_status=$status"
+            echo "curl_exit=$curl_exit"
+            echo "monkeycode_code=$code"
+            echo "monkeycode_message=$message"
+          } >> "$GITHUB_OUTPUT"
 
           if [ "$curl_exit" -ne 0 ] || [ "$code" != "0" ] || [ -z "$task_id" ]; then
             echo "failed=true" >> "$GITHUB_OUTPUT"
-            echo "monkeycode_code=$code" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -161,13 +173,40 @@ jobs:
             -f body="$(printf '[MONKEYCODE_REVIEW_TASK]\n\nMonkeyCode Review 任务已创建\n\n- Review 任务详情：%s\n- 关联 PR：%s' \
               "$TASK_URL" "$PR_URL")"
 
-      - name: 评论 Review 创建失败
-        if: failure() && steps.find_existing_review.outputs.exists != 'true' && steps.extract_pr.outputs.skip != 'true'
+      - name: 评论登录失败
+        if: >
+          failure() &&
+          steps.find_existing_review.outputs.exists != 'true' &&
+          steps.extract_pr.outputs.skip != 'true' &&
+          steps.login.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPOSITORY: ${{ github.repository }}
+          LOGIN_ERROR: ${{ steps.login.outputs.login_error }}
         run: |
           gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
             -X POST \
-            -f body="MonkeyCode Review 任务创建失败，请检查 workflow 日志。"
+            -f body="$(printf 'MonkeyCode Review 任务创建失败：自动登录失败，请检查 `MONKEYCODE_EMAIL` 和 `MONKEYCODE_PASSWORD` 配置是否正确。\n\n错误信息：%s' \
+              "${LOGIN_ERROR:-未知}")"
+
+      - name: 评论 Review 创建失败
+        if: >
+          failure() &&
+          steps.find_existing_review.outputs.exists != 'true' &&
+          steps.extract_pr.outputs.skip != 'true' &&
+          steps.login.outcome == 'success' &&
+          steps.create_review_task.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+          HTTP_STATUS: ${{ steps.create_review_task.outputs.http_status }}
+          CURL_EXIT: ${{ steps.create_review_task.outputs.curl_exit }}
+          MONKEYCODE_CODE: ${{ steps.create_review_task.outputs.monkeycode_code }}
+          MONKEYCODE_MESSAGE: ${{ steps.create_review_task.outputs.monkeycode_message }}
+        run: |
+          gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+            -X POST \
+            -f body="$(printf 'MonkeyCode Review 任务创建失败，请检查 workflow 日志。\n\n- HTTP 状态码：%s\n- curl 退出码：%s\n- MonkeyCode code：%s\n- MonkeyCode message：%s' \
+              "${HTTP_STATUS:-未获取}" "${CURL_EXIT:-未获取}" "${MONKEYCODE_CODE:-未获取}" "${MONKEYCODE_MESSAGE:-未获取}")"

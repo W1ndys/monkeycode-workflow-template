@@ -1,3 +1,4 @@
+<!-- 注意：请将下方的 your@email.com 和 YourName 替换为你的实际 Git 邮箱和用户名 -->
 请完成下面 issues 中描述的开发任务。工作流已自动创建了关联的分支和 PR，请直接在该分支上开发，每次提交直接推送到 PR。commit 作者邮箱是 your@email.com，用户名是 YourName。开发任务完成后，请使用 gh pr edit 更新关联 PR 的描述内容，格式如下：
 
 ## 关联 Issue

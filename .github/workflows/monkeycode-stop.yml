@@ -197,11 +197,35 @@ jobs:
           ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          DEV_SUCCESS: ${{ steps.stop_dev.outputs.success }}
+          REVIEW_SUCCESS: ${{ steps.stop_review.outputs.success }}
+          DEV_TASK_ID: ${{ steps.extract_dev_task.outputs.task_id }}
+          REVIEW_TASK_ID: ${{ steps.extract_review_task.outputs.task_id }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" \
-            --repo "$GITHUB_REPOSITORY" \
-            --body "$(printf 'MonkeyCode 开发任务已完成，PR #%s（%s）已合并，相关任务已终止，本 Issue 自动关闭。' \
-              "$PR_NUMBER" "$PR_TITLE")"
+          # 构建终止状态摘要
+          stop_summary=""
+          has_failure=false
+
+          if [ -n "$DEV_TASK_ID" ] && [ "$DEV_SUCCESS" != "true" ]; then
+            has_failure=true
+            stop_summary="${stop_summary}\n注意：开发任务终止失败，请手动处理。"
+          fi
+          if [ -n "$REVIEW_TASK_ID" ] && [ "$REVIEW_SUCCESS" != "true" ]; then
+            has_failure=true
+            stop_summary="${stop_summary}\nReview 任务终止失败，请手动处理。"
+          fi
+
+          if [ "$has_failure" = "true" ]; then
+            gh issue comment "$ISSUE_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$(printf 'MonkeyCode 开发任务已完成，PR #%s（%s）已合并，本 Issue 自动关闭。%b' \
+                "$PR_NUMBER" "$PR_TITLE" "$stop_summary")"
+          else
+            gh issue comment "$ISSUE_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$(printf 'MonkeyCode 开发任务已完成，PR #%s（%s）已合并，相关任务已终止，本 Issue 自动关闭。' \
+                "$PR_NUMBER" "$PR_TITLE")"
+          fi
 
           gh issue close "$ISSUE_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
