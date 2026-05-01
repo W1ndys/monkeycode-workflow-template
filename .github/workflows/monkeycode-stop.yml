@@ -150,7 +150,16 @@ jobs:
         env:
           COOKIE_FILE: ${{ steps.login.outputs.cookie_file }}
           TASK_ID: ${{ steps.extract_review_task.outputs.task_id }}
+          DEV_TASK_ID: ${{ steps.extract_dev_task.outputs.task_id }}
         run: |
+          # 如果 review 任务 ID 和开发任务 ID 相同（复用模式），跳过重复停止
+          if [ "$TASK_ID" = "$DEV_TASK_ID" ]; then
+            echo "Review 任务与开发任务相同（复用模式），已在上一步停止"
+            echo "success=true" >> "$GITHUB_OUTPUT"
+            echo "reused=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           response="$(
             curl -sS \
               -X PUT \
@@ -177,6 +186,7 @@ jobs:
           DEV_TASK_ID: ${{ steps.extract_dev_task.outputs.task_id }}
           REVIEW_TASK_ID: ${{ steps.extract_review_task.outputs.task_id }}
           IS_MERGED: ${{ steps.pr_state.outputs.is_merged }}
+          REVIEW_REUSED: ${{ steps.stop_review.outputs.reused }}
         run: |
           if [ "$IS_MERGED" = "true" ]; then
             body="MonkeyCode 任务终止报告（PR 已合并）\n\n"
@@ -195,7 +205,9 @@ jobs:
           fi
 
           if [ -n "$REVIEW_TASK_ID" ]; then
-            if [ "$REVIEW_SUCCESS" = "true" ]; then
+            if [ "$REVIEW_REUSED" = "true" ]; then
+              body="${body}- Review 任务：与开发任务共用同一环境，已一并终止\n"
+            elif [ "$REVIEW_SUCCESS" = "true" ]; then
               body="${body}- Review 任务：已成功终止\n"
             else
               body="${body}- Review 任务：终止失败，请手动处理\n"
