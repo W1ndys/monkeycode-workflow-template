@@ -58,6 +58,8 @@ monkeycode-stop.yml 触发
 
 ```
 你的仓库/
+  scripts/
+    monkeycode_config_helper.py  # 配置辅助脚本（获取模型/项目/镜像 ID）
   .github/
     workflows/
       monkeycode-task.yml      # Issue 触发创建开发任务
@@ -90,7 +92,7 @@ monkeycode-stop.yml 触发
 
 | Variable | 说明 | 获取方式 |
 |----------|------|---------|
-| `MONKEYCODE_MODEL_ID` | AI 模型 ID | MonkeyCode 控制台创建任务时抓包获取 |
+| `MONKEYCODE_MODEL_ID` | AI 模型 ID | 使用配置辅助脚本获取（见下方） |
 | `MONKEYCODE_IMAGE_ID` | 开发环境镜像 ID | 同上 |
 | `MONKEYCODE_PROJECT_ID` | 项目 ID | 同上 |
 | `MONKEYCODE_TASK_PROMPT` | (可选) 自定义任务 prompt | 见下方说明 |
@@ -117,10 +119,42 @@ monkeycode-stop.yml 触发
 
 ### 获取 Model ID / Image ID / Project ID
 
+推荐使用仓库自带的配置辅助脚本，自动登录并查询账号内的可用资源：
+
+```bash
+# 设置环境变量
+export MONKEYCODE_EMAIL="your-email@example.com"
+export MONKEYCODE_PASSWORD="your-password"
+
+# 查询所有配置信息（模型、项目、镜像）
+python3 scripts/monkeycode_config_helper.py
+
+# 仅查询模型列表
+python3 scripts/monkeycode_config_helper.py models
+
+# 仅查询项目列表
+python3 scripts/monkeycode_config_helper.py projects
+
+# 仅查询镜像列表
+python3 scripts/monkeycode_config_helper.py images
+
+# 输出 JSON 格式（方便脚本解析）
+python3 scripts/monkeycode_config_helper.py --json
+```
+
+脚本会以表格形式列出所有可用的模型、项目和镜像，并在末尾给出推荐的 Variable 配置值。将对应的 ID 填入仓库 Variables 即可。
+
+<details>
+<summary>备选方案：通过 DevTools 抓包获取</summary>
+
+如果无法运行辅助脚本，也可以手动获取：
+
 1. 登录 MonkeyCode 控制台
 2. 手动创建一个开发任务（不需要真正执行）
 3. 打开 DevTools -> Network，观察创建任务的 POST 请求
 4. 从请求体中提取 `model_id`、`image_id`，从响应或 URL 中提取 `project_id`
+
+</details>
 
 ### 自定义任务 Prompt
 
@@ -198,6 +232,8 @@ monkeycode-stop.yml 触发
 ## 目录结构
 
 ```
+scripts/
+  monkeycode_config_helper.py  # 配置辅助脚本（获取模型/项目/镜像 ID）
 .github/
   workflows/
     monkeycode-task.yml       # Issue 触发创建 MonkeyCode 开发任务
