@@ -114,7 +114,14 @@ jobs:
 
       - name: 检出仓库代码
         if: steps.check_permission.outputs.authorized == 'true' && steps.find_existing.outputs.exists != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: 恢复 MonkeyCode 登录缓存
+        if: steps.check_permission.outputs.authorized == 'true' && steps.find_existing.outputs.exists != 'true'
+        uses: actions/cache@v5
+        with:
+          path: .monkeycode-cookie-cache
+          key: monkeycode-cookie-${{ github.repository }}
 
       - name: MonkeyCode 自动登录
         if: steps.check_permission.outputs.authorized == 'true' && steps.find_existing.outputs.exists != 'true'
@@ -207,16 +214,12 @@ jobs:
             pr_section="无"
           fi
 
-          # 使用 jq --arg 安全拼接 content，避免 ISSUE_BODY 中特殊字符导致问题
-          content="$(
-            jq -cn \
-              --arg task_instruction "$task_instruction" \
-              --arg issue_title "$ISSUE_TITLE" \
-              --arg issue_body "$ISSUE_BODY" \
-              --arg pr_section "$pr_section" \
-              --arg issue_url "$ISSUE_URL" \
-              '"## 任务说明\n" + $task_instruction + "\n\n### issues 标题\n" + $issue_title + "\n\n### issues 内容\n" + $issue_body + "\n\n### 关联的 PR\n" + $pr_section + "\n\n### 关联的 issues\n" + $issue_url' \
-            | jq -r '.'
+          content="$(printf '## 任务说明\n%s\n\n### issues 标题\n%s\n\n### issues 内容\n%s\n\n### 关联的 PR\n%s\n\n### 关联的 issues\n%s' \
+            "$task_instruction" \
+            "$ISSUE_TITLE" \
+            "$ISSUE_BODY" \
+            "$pr_section" \
+            "$ISSUE_URL"
           )"
 
           payload="$(
@@ -251,7 +254,6 @@ jobs:
           )"
           curl_exit=$?
           response="$(cat "$response_file")"
-          rm -f "$response_file"
 
           task_id="$(printf '%s' "$response" | jq -r '.data.id // empty' 2>/dev/null)"
           code="$(printf '%s' "$response" | jq -r '.code // empty' 2>/dev/null)"

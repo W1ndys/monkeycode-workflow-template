@@ -1,0 +1,193 @@
+name: MonkeyCode 开发完成确认
+
+on:
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: monkeycode-confirm-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  confirm-and-stop:
+    name: 停止开发任务并等待确认
+    runs-on: ubuntu-latest
+    if: >
+      !github.event.issue.pull_request &&
+      contains(github.event.issue.labels.*.name, 'monkeycode') &&
+      contains(github.event.comment.body, '[MONKEYCODE_TASK_COMPLETE]')
+
+    steps:
+      - name: 检查是否已有待确认评论
+        id: find_existing_confirm
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          exists="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+              --paginate \
+              --jq 'any(.[]; (.body // "") | contains("[MONKEYCODE_PENDING_REVIEW]"))'
+          )"
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+
+      - name: 从 Issue 评论提取 PR 链接
+        if: steps.find_existing_confirm.outputs.exists != 'true'
+        id: extract_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          pr_url="$(
+            printf '%s' "$COMMENT_BODY" \
+              | grep -oP 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' \
+              | head -1
+          )"
+
+          if [ -z "$pr_url" ]; then
+            pr_url="$(
+              gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+                --paginate \
+                --jq '[.[] | select((.body // "") | test("https://github\\.com/.+/pull/[0-9]+")) | .body] | last // empty' \
+              | grep -oP 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' \
+              | head -1
+            )"
+          fi
+
+          if [ -z "$pr_url" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "未找到关联 PR 链接，跳过"
+            exit 0
+          fi
+
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+
+          # 从 PR URL 提取 PR 编号
+          pr_number="$(printf '%s' "$pr_url" | grep -oP '[0-9]+$')"
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+
+      - name: 从 Issue 评论提取开发任务 ID
+        if: steps.find_existing_confirm.outputs.exists != 'true' && steps.extract_pr.outputs.skip != 'true'
+        id: extract_dev_task
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          task_id="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+              --paginate \
+              --jq '[.[] | select((.body // "") | (contains("monkeycode-ai.com/console/task/") and (contains("[MONKEYCODE_REVIEW_TASK]") | not) and (contains("[MONKEYCODE_PENDING_REVIEW]") | not))) | .body] | last // empty' \
+            | grep -oP 'monkeycode-ai\.com/console/task/\K[0-9a-f-]+' \
+            | head -1
+          )"
+
+          if [ -n "$task_id" ]; then
+            echo "task_id=$task_id" >> "$GITHUB_OUTPUT"
+          else
+            echo "未找到开发任务 ID"
+          fi
+
+      - name: 检出仓库代码
+        if: >
+          steps.find_existing_confirm.outputs.exists != 'true' &&
+          steps.extract_pr.outputs.skip != 'true' &&
+          steps.extract_dev_task.outputs.task_id != ''
+        uses: actions/checkout@v6
+
+      - name: 恢复 MonkeyCode 登录缓存
+        if: >
+          steps.find_existing_confirm.outputs.exists != 'true' &&
+          steps.extract_pr.outputs.skip != 'true' &&
+          steps.extract_dev_task.outputs.task_id != ''
+        uses: actions/cache@v5
+        with:
+          path: .monkeycode-cookie-cache
+          key: monkeycode-cookie-${{ github.repository }}
+
+      - name: MonkeyCode 自动登录
+        if: >
+          steps.find_existing_confirm.outputs.exists != 'true' &&
+          steps.extract_pr.outputs.skip != 'true' &&
+          steps.extract_dev_task.outputs.task_id != ''
+        id: login
+        env:
+          MONKEYCODE_EMAIL: ${{ secrets.MONKEYCODE_EMAIL }}
+          MONKEYCODE_PASSWORD: ${{ secrets.MONKEYCODE_PASSWORD }}
+        run: |
+          python3 .github/scripts/monkeycode_login.py
+
+      - name: 停止开发任务
+        if: >
+          steps.find_existing_confirm.outputs.exists != 'true' &&
+          steps.extract_pr.outputs.skip != 'true' &&
+          steps.extract_dev_task.outputs.task_id != '' &&
+          steps.login.outputs.login_success == 'true'
+        id: stop_dev
+        env:
+          COOKIE_FILE: ${{ steps.login.outputs.cookie_file }}
+          TASK_ID: ${{ steps.extract_dev_task.outputs.task_id }}
+        run: |
+          response="$(
+            curl -sS \
+              -X PUT \
+              "https://monkeycode-ai.com/api/v1/users/tasks/stop" \
+              -H "accept: */*" \
+              -H "content-type: application/json" \
+              -b "$COOKIE_FILE" \
+              --data-raw "{\"id\":\"${TASK_ID}\"}"
+          )"
+          code="$(printf '%s' "$response" | jq -r '.code // empty' 2>/dev/null)"
+          if [ "$code" = "0" ]; then
+            echo "success=true" >> "$GITHUB_OUTPUT"
+            echo "开发任务已成功停止"
+          else
+            echo "开发任务停止失败: code=$code"
+          fi
+
+      - name: 在 PR 下发表待确认评论
+        if: >
+          steps.find_existing_confirm.outputs.exists != 'true' &&
+          steps.extract_pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.extract_pr.outputs.pr_number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          DEV_STOP_SUCCESS: ${{ steps.stop_dev.outputs.success }}
+          DEV_TASK_ID: ${{ steps.extract_dev_task.outputs.task_id }}
+        run: |
+          stop_info=""
+          if [ -n "$DEV_TASK_ID" ]; then
+            if [ "$DEV_STOP_SUCCESS" = "true" ]; then
+              stop_info="开发任务已自动停止，额度已释放。"
+            else
+              stop_info="开发任务停止失败，请手动处理。"
+            fi
+          else
+            stop_info="未找到关联的开发任务。"
+          fi
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$(printf '[MONKEYCODE_PENDING_REVIEW]\n\n## MonkeyCode 开发任务已完成\n\n%s\n\n请检查 PR 中的代码改动，确认无误后通过以下任一方式触发 MonkeyCode Review 任务：\n\n1. 在 PR 页面点击 **Approve** 审批通过\n2. 给 PR 添加 `ready-for-review` 标签（适用于自己创建的 PR 无法 Approve 的情况）' \
+              "$stop_info")"
+
+      - name: 在 Issue 下标记开发完成
+        if: >
+          steps.find_existing_confirm.outputs.exists != 'true' &&
+          steps.extract_pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_URL: ${{ steps.extract_pr.outputs.pr_url }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+            -X POST \
+            -f body="$(printf '[MONKEYCODE_PENDING_REVIEW]\n\nMonkeyCode 开发任务已完成，等待开发者确认后触发 Review。\n\n- 关联 PR：%s\n- 请前往 PR 页面检查代码，通过 Approve 审批或添加 `ready-for-review` 标签触发 Review。' \
+              "$PR_URL")"
