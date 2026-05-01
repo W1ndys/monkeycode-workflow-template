@@ -1,4 +1,4 @@
-name: MonkeyCode 合并终止任务
+name: MonkeyCode PR 关闭终止任务
 
 on:
   pull_request:
@@ -14,9 +14,13 @@ jobs:
   stop-task:
     name: 终止 MonkeyCode 任务
     runs-on: ubuntu-latest
-    if: github.event.pull_request.merged == true
 
     steps:
+      - name: 判断 PR 关闭类型
+        id: pr_state
+        run: |
+          echo "is_merged=${{ github.event.pull_request.merged }}" >> "$GITHUB_OUTPUT"
+
       - name: 从 PR 提取关联 Issue 编号
         id: extract_issue
         env:
@@ -46,7 +50,7 @@ jobs:
           task_id="$(
             gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
               --paginate \
-              --jq '[.[] | select((.body // "") | (contains("monkeycode-ai.com/console/task/") and (contains("[MONKEYCODE_REVIEW_TASK]") | not))) | .body] | last // empty' \
+              --jq '[.[] | select((.body // "") | (contains("monkeycode-ai.com/console/task/") and (contains("[MONKEYCODE_REVIEW_TASK]") | not) and (contains("[MONKEYCODE_PENDING_REVIEW]") | not))) | .body] | last // empty' \
             | grep -oP 'monkeycode-ai\.com/console/task/\K[0-9a-f-]+' \
             | head -1
           )"
@@ -82,7 +86,16 @@ jobs:
         if: >
           steps.extract_issue.outputs.skip != 'true' &&
           (steps.extract_dev_task.outputs.task_id != '' || steps.extract_review_task.outputs.task_id != '')
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: 恢复 MonkeyCode 登录缓存
+        if: >
+          steps.extract_issue.outputs.skip != 'true' &&
+          (steps.extract_dev_task.outputs.task_id != '' || steps.extract_review_task.outputs.task_id != '')
+        uses: actions/cache@v5
+        with:
+          path: .monkeycode-cookie-cache
+          key: monkeycode-cookie-${{ github.repository }}
 
       - name: MonkeyCode 自动登录
         if: >
@@ -163,8 +176,13 @@ jobs:
           REVIEW_SUCCESS: ${{ steps.stop_review.outputs.success }}
           DEV_TASK_ID: ${{ steps.extract_dev_task.outputs.task_id }}
           REVIEW_TASK_ID: ${{ steps.extract_review_task.outputs.task_id }}
+          IS_MERGED: ${{ steps.pr_state.outputs.is_merged }}
         run: |
-          body="MonkeyCode 任务终止报告\n\n"
+          if [ "$IS_MERGED" = "true" ]; then
+            body="MonkeyCode 任务终止报告（PR 已合并）\n\n"
+          else
+            body="MonkeyCode 任务终止报告（PR 已关闭，未合并）\n\n"
+          fi
 
           if [ -n "$DEV_TASK_ID" ]; then
             if [ "$DEV_SUCCESS" = "true" ]; then
@@ -190,46 +208,35 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body "$(printf '%b' "$body")"
 
-      - name: 评论并关闭关联 Issue
-        if: steps.extract_issue.outputs.skip != 'true'
+      - name: 评论并关闭关联 Issue（PR 合并时）
+        if: steps.extract_issue.outputs.skip != 'true' && steps.pr_state.outputs.is_merged == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
-          DEV_SUCCESS: ${{ steps.stop_dev.outputs.success }}
-          REVIEW_SUCCESS: ${{ steps.stop_review.outputs.success }}
-          DEV_TASK_ID: ${{ steps.extract_dev_task.outputs.task_id }}
-          REVIEW_TASK_ID: ${{ steps.extract_review_task.outputs.task_id }}
         run: |
-          # 构建终止状态摘要
-          stop_summary=""
-          has_failure=false
-
-          if [ -n "$DEV_TASK_ID" ] && [ "$DEV_SUCCESS" != "true" ]; then
-            has_failure=true
-            stop_summary="${stop_summary}\n注意：开发任务终止失败，请手动处理。"
-          fi
-          if [ -n "$REVIEW_TASK_ID" ] && [ "$REVIEW_SUCCESS" != "true" ]; then
-            has_failure=true
-            stop_summary="${stop_summary}\nReview 任务终止失败，请手动处理。"
-          fi
-
-          if [ "$has_failure" = "true" ]; then
-            gh issue comment "$ISSUE_NUMBER" \
-              --repo "$GITHUB_REPOSITORY" \
-              --body "$(printf 'MonkeyCode 开发任务已完成，PR #%s（%s）已合并，本 Issue 自动关闭。%b' \
-                "$PR_NUMBER" "$PR_TITLE" "$stop_summary")"
-          else
-            gh issue comment "$ISSUE_NUMBER" \
-              --repo "$GITHUB_REPOSITORY" \
-              --body "$(printf 'MonkeyCode 开发任务已完成，PR #%s（%s）已合并，相关任务已终止，本 Issue 自动关闭。' \
-                "$PR_NUMBER" "$PR_TITLE")"
-          fi
+          gh issue comment "$ISSUE_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$(printf 'MonkeyCode 开发任务已完成，PR #%s（%s）已合并，相关任务已终止，本 Issue 自动关闭。' \
+              "$PR_NUMBER" "$PR_TITLE")"
 
           gh issue close "$ISSUE_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --reason completed
+
+      - name: 评论关联 Issue（PR 关闭未合并时）
+        if: steps.extract_issue.outputs.skip != 'true' && steps.pr_state.outputs.is_merged != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$(printf 'PR #%s（%s）已关闭（未合并），关联的 MonkeyCode 开发和 Review 任务已终止。如需继续开发，请重新创建 PR 或 Issue。' \
+              "$PR_NUMBER" "$PR_TITLE")"
 
       - name: 删除关联分支
         if: steps.extract_issue.outputs.skip != 'true'

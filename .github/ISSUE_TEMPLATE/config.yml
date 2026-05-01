@@ -1,1 +1,6 @@
 blank_issues_enabled: true
+# 如需添加 Discussions 链接，取消下方注释并替换为你的仓库地址
+# contact_links:
+#   - name: 一般问题讨论
+#     url: https://github.com/YOUR_USERNAME/YOUR_REPO/discussions
+#     about: 如果你有一般性问题或建议，请在 Discussions 中讨论
