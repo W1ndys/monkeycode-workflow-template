@@ -50,7 +50,74 @@ monkeycode-stop.yml 触发
   |-- 删除开发分支
 ```
 
-## 快速开始
+## 通过 AI Agent 安装（推荐）
+
+如果你正在使用 AI 编程工具（如 Cursor、Claude Code、Copilot、MonkeyCode 等），可以直接将下方指令复制给 Agent，它会自动完成工作流模板的安装。
+
+### 安装指令
+
+将以下内容复制到 Agent 对话框中，替换其中的占位符后发送：
+
+> 请帮我安装 MonkeyCode GitHub Workflow 集成模板到当前仓库。
+>
+> 步骤如下：
+>
+> 1. 克隆模板仓库到临时目录：
+>    `git clone https://github.com/chaitin/monkeycode-github-workflow.git /tmp/monkeycode-workflow`
+>
+> 2. 将以下文件和目录从模板仓库复制到当前仓库（保持目录结构不变）：
+>    - `scripts/monkeycode_config_helper.py`
+>    - `.github/workflows/monkeycode-task.yml`
+>    - `.github/workflows/monkeycode-confirm.yml`
+>    - `.github/workflows/monkeycode-review.yml`
+>    - `.github/workflows/monkeycode-stop.yml`
+>    - `.github/scripts/monkeycode_login.py`
+>    - `.github/scripts/monkeycode_ws.py`
+>    - `.github/prompts/task-instruction.md`
+>    - `.github/prompts/review-instruction.md`
+>    - `.github/ISSUE_TEMPLATE/monkeycode-task.yml`
+>    - `.github/ISSUE_TEMPLATE/config.yml`
+>
+> 3. 检查当前仓库的默认分支名称（main 还是 master）。如果是 master，需要修改以下文件：
+>    - `monkeycode-task.yml` 中所有 `--base main` 改为 `--base master`
+>    - `monkeycode-task.yml` 中 `repo: { branch: "main" }` 改为 `repo: { branch: "master" }`
+>
+> 4. 修改 `.github/prompts/task-instruction.md` 中的 commit 作者信息：
+>    - 将 `your@email.com` 替换为我的 Git 邮箱：`{你的邮箱}`
+>    - 将 `YourName` 替换为我的 Git 用户名：`{你的用户名}`
+>
+> 5. 清理临时目录。
+>
+> 完成后，提醒我需要手动完成以下配置：
+> - 在仓库 Settings -> Secrets 中添加 `MONKEYCODE_EMAIL` 和 `MONKEYCODE_PASSWORD`
+> - 在仓库 Settings -> Variables 中添加 `MONKEYCODE_MODEL_ID`、`MONKEYCODE_IMAGE_ID`、`MONKEYCODE_PROJECT_ID`
+> - 在仓库 Settings -> Actions -> General 中开启 "Allow GitHub Actions to create and approve pull requests" 和 "Read and write permissions"
+> - 在仓库 Issues -> Labels 中创建 `monkeycode` 标签
+
+### Agent 无法自动完成的配置
+
+以下配置涉及 GitHub 仓库设置页面操作，需要你手动完成：
+
+| 配置项 | 操作位置 | 说明 |
+|--------|---------|------|
+| `MONKEYCODE_EMAIL` | Settings -> Secrets | MonkeyCode 登录邮箱 |
+| `MONKEYCODE_PASSWORD` | Settings -> Secrets | MonkeyCode 登录密码 |
+| `MONKEYCODE_MODEL_ID` | Settings -> Variables | AI 模型 ID（通过 `python3 scripts/monkeycode_config_helper.py` 获取） |
+| `MONKEYCODE_IMAGE_ID` | Settings -> Variables | 开发环境镜像 ID（同上） |
+| `MONKEYCODE_PROJECT_ID` | Settings -> Variables | 项目 ID（同上） |
+| Actions 权限 | Settings -> Actions -> General | 勾选允许创建 PR + 读写权限 |
+| `monkeycode` 标签 | Issues -> Labels | 创建触发标签 |
+
+### 可选：让 Agent 帮你获取配置 ID
+
+如果你已经设置了 MonkeyCode 账号的环境变量，可以让 Agent 运行配置辅助脚本：
+
+> 请运行 `python3 scripts/monkeycode_config_helper.py` 帮我查询可用的模型、项目和镜像 ID。
+> 运行前需要设置环境变量 `MONKEYCODE_EMAIL` 和 `MONKEYCODE_PASSWORD`。
+
+---
+
+## 快速开始（手动安装）
 
 ### 1. 复制文件到你的仓库
 
