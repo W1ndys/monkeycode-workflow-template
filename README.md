@@ -58,41 +58,43 @@ monkeycode-stop.yml 触发
 
 将以下内容复制到 Agent 对话框中，替换其中的占位符后发送：
 
-> 请帮我安装 MonkeyCode GitHub Workflow 集成模板到当前仓库。
->
-> 步骤如下：
->
-> 1. 克隆模板仓库到临时目录：
->    `git clone https://github.com/chaitin/monkeycode-github-workflow.git /tmp/monkeycode-workflow`
->
-> 2. 将以下文件和目录从模板仓库复制到当前仓库（保持目录结构不变）：
->    - `scripts/monkeycode_config_helper.py`
->    - `.github/workflows/monkeycode-task.yml`
->    - `.github/workflows/monkeycode-confirm.yml`
->    - `.github/workflows/monkeycode-review.yml`
->    - `.github/workflows/monkeycode-stop.yml`
->    - `.github/scripts/monkeycode_login.py`
->    - `.github/scripts/monkeycode_ws.py`
->    - `.github/prompts/task-instruction.md`
->    - `.github/prompts/review-instruction.md`
->    - `.github/ISSUE_TEMPLATE/monkeycode-task.yml`
->    - `.github/ISSUE_TEMPLATE/config.yml`
->
-> 3. 检查当前仓库的默认分支名称（main 还是 master）。如果是 master，需要修改以下文件：
->    - `monkeycode-task.yml` 中所有 `--base main` 改为 `--base master`
->    - `monkeycode-task.yml` 中 `repo: { branch: "main" }` 改为 `repo: { branch: "master" }`
->
-> 4. 修改 `.github/prompts/task-instruction.md` 中的 commit 作者信息：
->    - 将 `your@email.com` 替换为我的 Git 邮箱：`{你的邮箱}`
->    - 将 `YourName` 替换为我的 Git 用户名：`{你的用户名}`
->
-> 5. 清理临时目录。
->
-> 完成后，提醒我需要手动完成以下配置：
-> - 在仓库 Settings -> Secrets 中添加 `MONKEYCODE_EMAIL` 和 `MONKEYCODE_PASSWORD`
-> - 在仓库 Settings -> Variables 中添加 `MONKEYCODE_MODEL_ID`、`MONKEYCODE_IMAGE_ID`、`MONKEYCODE_PROJECT_ID`
-> - 在仓库 Settings -> Actions -> General 中开启 "Allow GitHub Actions to create and approve pull requests" 和 "Read and write permissions"
-> - 在仓库 Issues -> Labels 中创建 `monkeycode` 标签
+```
+ 请帮我安装 MonkeyCode GitHub Workflow 集成模板到当前仓库。
+
+ 步骤如下：
+
+ 1. 克隆模板仓库到临时目录：
+    `git clone https://github.com/chaitin/monkeycode-github-workflow.git /tmp/monkeycode-workflow`
+
+ 2. 将以下文件和目录从模板仓库复制到当前仓库（保持目录结构不变）：
+    - `scripts/monkeycode_config_helper.py`
+    - `.github/workflows/monkeycode-task.yml`
+    - `.github/workflows/monkeycode-confirm.yml`
+    - `.github/workflows/monkeycode-review.yml`
+    - `.github/workflows/monkeycode-stop.yml`
+    - `.github/scripts/monkeycode_login.py`
+    - `.github/scripts/monkeycode_ws.py`
+    - `.github/prompts/task-instruction.md`
+    - `.github/prompts/review-instruction.md`
+    - `.github/ISSUE_TEMPLATE/monkeycode-task.yml`
+    - `.github/ISSUE_TEMPLATE/config.yml`
+
+ 3. 检查当前仓库的默认分支名称（main 还是 master）。如果是 master，需要修改以下文件：
+    - `monkeycode-task.yml` 中所有 `--base main` 改为 `--base master`
+    - `monkeycode-task.yml` 中 `repo: { branch: "main" }` 改为 `repo: { branch: "master" }`
+
+ 4. 修改 `.github/prompts/task-instruction.md` 中的 commit 作者信息：
+    - 将 `your@email.com` 替换为我的 Git 邮箱：`{你的邮箱}`
+    - 将 `YourName` 替换为我的 Git 用户名：`{你的用户名}`
+
+ 5. 清理临时目录。
+
+ 完成后，提醒我需要手动完成以下配置：
+ - 在仓库 Settings -> Secrets 中添加 `MONKEYCODE_EMAIL` 和 `MONKEYCODE_PASSWORD`
+ - 在仓库 Settings -> Variables 中添加 `MONKEYCODE_MODEL_ID`、`MONKEYCODE_IMAGE_ID`、`MONKEYCODE_PROJECT_ID`
+ - 在仓库 Settings -> Actions -> General 中开启 "Allow GitHub Actions to create and approve pull requests" 和 "Read and write permissions"
+ - 在仓库 Issues -> Labels 中创建 `monkeycode` 标签
+```
 
 ### Agent 无法自动完成的配置
 
