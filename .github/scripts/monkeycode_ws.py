@@ -71,11 +71,11 @@ def b64encode(text: str) -> str:
 def restart_context(task_id: str, cookie_header: str) -> bool:
     """通过 Control WebSocket 重置任务上下文。
 
-    协议：
-      上行: {"type":"call","kind":"restart","data":<json_bytes>}
-      data 内容: {"request_id":"...","load_session":false}
-      下行: {"type":"call-response","kind":"restart","data":<json_bytes>}
-      data 内容: {"success":true,"message":"...","session_id":"..."}
+    协议（TaskStream 结构体中 Data 字段为 []byte，JSON 序列化时为 base64）：
+      上行: {"type":"call","kind":"restart","data":"<base64(json)>"}
+        json 内容: {"request_id":"...","load_session":false}
+      下行: {"type":"call-response","kind":"restart","data":"<base64(json)>"}
+        json 内容: {"success":true,"message":"...","session_id":"..."}
     """
     url = f"{WS_BASE_URL}{CONTROL_ENDPOINT}?id={task_id}"
     request_id = str(uuid.uuid4())
@@ -89,12 +89,12 @@ def restart_context(task_id: str, cookie_header: str) -> bool:
     )
 
     try:
-        # 发送 restart call
+        # 发送 restart call — data 必须是 base64 编码的 JSON 字符串
         call_data = json.dumps({"request_id": request_id, "load_session": False})
         message = json.dumps({
             "type": "call",
             "kind": "restart",
-            "data": json.loads(call_data),  # data 是 JSON object，不是字符串
+            "data": b64encode(call_data),
         })
         ws.send(message)
         print(f"[restart] 已发送 restart 请求 (request_id={request_id})")
@@ -115,10 +115,20 @@ def restart_context(task_id: str, cookie_header: str) -> bool:
 
             if resp.get("type") == "call-response" and resp.get("kind") == "restart":
                 data = resp.get("data")
+                # data 是 base64 编码的 JSON 字符串
                 if isinstance(data, str):
-                    data = json.loads(data)
-                success = data.get("success", False) if data else False
-                msg = data.get("message", "") if data else ""
+                    try:
+                        data = json.loads(
+                            base64.b64decode(data).decode("utf-8")
+                        )
+                    except Exception:
+                        # 兼容：如果不是 base64，尝试直接解析 JSON
+                        try:
+                            data = json.loads(data)
+                        except Exception:
+                            pass
+                success = data.get("success", False) if isinstance(data, dict) else False
+                msg = data.get("message", "") if isinstance(data, dict) else ""
                 print(f"[restart] 响应: success={success}, message={msg}")
                 return success
 
