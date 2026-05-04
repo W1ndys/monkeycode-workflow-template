@@ -1,27 +1,25 @@
-"""MonkeyCode 配置辅助脚本。
+#!/usr/bin/env python3
+"""MonkeyCode 配置辅助 CLI。
 
 通过 API 获取账号内的模型、项目、开发环境镜像 ID，
 简化配置流程，避免强依赖抓包获取。
 
 用法:
-    # 查询所有配置信息（模型、项目、镜像）
-    python3 scripts/monkeycode_config_helper.py
+    # 查询所有配置信息
+    ./scripts/monkeycode_config_helper.py
 
-    # 仅查询模型列表
-    python3 scripts/monkeycode_config_helper.py models
+    # 子命令查询
+    ./scripts/monkeycode_config_helper.py models
+    ./scripts/monkeycode_config_helper.py projects
+    ./scripts/monkeycode_config_helper.py images
 
-    # 仅查询项目列表
-    python3 scripts/monkeycode_config_helper.py projects
+    # JSON 输出
+    ./scripts/monkeycode_config_helper.py models --json
+    ./scripts/monkeycode_config_helper.py --json
 
-    # 仅查询镜像列表
-    python3 scripts/monkeycode_config_helper.py images
-
-    # 输出 JSON 格式（方便脚本解析）
-    python3 scripts/monkeycode_config_helper.py --json
-
-环境变量:
-    MONKEYCODE_EMAIL    - 登录邮箱（必需）
-    MONKEYCODE_PASSWORD - 登录密码（必需）
+环境变量（优先级低于 CLI 参数）:
+    MONKEYCODE_EMAIL    - 登录邮箱
+    MONKEYCODE_PASSWORD - 登录密码
     MONKEYCODE_WORKERS  - PoW 并行 worker 数（可选，默认为 CPU 核心数）
 """
 from __future__ import annotations
@@ -45,6 +43,7 @@ from monkeycode_login import (
     COOKIE_CACHE_FILE,
 )
 
+import getpass
 import http.cookiejar
 import urllib.request
 import urllib.error
@@ -144,7 +143,7 @@ def _owner_label(owner: dict | None) -> str:
 def print_models(models: list[dict]) -> None:
     """以表格形式打印模型列表。"""
     if not models:
-        print("  (no models found)")
+        print("  (未找到模型)")
         return
 
     # Header
@@ -163,7 +162,7 @@ def print_models(models: list[dict]) -> None:
 def print_projects(projects: list[dict]) -> None:
     """以表格形式打印项目列表。"""
     if not projects:
-        print("  (no projects found)")
+        print("  (未找到项目)")
         return
 
     print(f"  {'ID':<38} {'Name':<30} {'Platform':<10} {'Repo URL'}")
@@ -180,7 +179,7 @@ def print_projects(projects: list[dict]) -> None:
 def print_images(images: list[dict]) -> None:
     """以表格形式打印镜像列表。"""
     if not images:
-        print("  (no images found)")
+        print("  (未找到镜像)")
         return
 
     print(f"  {'ID':<38} {'Name':<30} {'Owner':<15} {'Default'}")
@@ -196,91 +195,104 @@ def print_images(images: list[dict]) -> None:
 
 # --- Main ---
 
-def get_authenticated_opener() -> urllib.request.OpenerDirector:
+def get_authenticated_opener(
+    email: str,
+    password: str,
+) -> urllib.request.OpenerDirector:
     """登录并返回带认证 cookie 的 opener。
 
     优先使用缓存 cookie，失效时自动重新登录。
     """
-    email = os.environ.get("MONKEYCODE_EMAIL", "")
-    password = os.environ.get("MONKEYCODE_PASSWORD", "")
-
-    if not email or not password:
-        print(
-            "Error: please set MONKEYCODE_EMAIL and MONKEYCODE_PASSWORD",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Try cached cookie first
     os.makedirs(COOKIE_CACHE_DIR, exist_ok=True)
     cached_jar = load_cookies_from_file(COOKIE_CACHE_FILE)
     if cached_jar is not None:
-        print("Found cached cookie, verifying...")
+        print("发现缓存 cookie，正在验证...")
         if verify_cached_cookie(cached_jar):
-            print("Cached cookie is valid, skipping login")
+            print("缓存 cookie 有效，跳过登录")
             return _build_opener(cached_jar)
-        print("Cached cookie expired, re-logging in...")
+        print("缓存 cookie 已过期，重新登录...")
 
-    # Full login
     _, cookie_jar = login(email, password)
     save_cookies(cookie_jar, COOKIE_CACHE_FILE, mozilla_compat=True)
     return _build_opener(cookie_jar)
 
 
+def _run_query(
+    email: str,
+    password: str,
+    resources: list[str],
+    output_json: bool,
+) -> None:
+    """执行查询并输出结果。"""
+    opener = get_authenticated_opener(email, password)
+    result: dict[str, list[dict]] = {}
+
+    fetchers: dict[str, tuple[str, callable, callable]] = {
+        "models": ("模型", fetch_models, print_models),
+        "projects": ("项目", fetch_projects, print_projects),
+        "images": ("镜像", fetch_images, print_images),
+    }
+
+    for res in resources:
+        label, fetcher, printer = fetchers[res]
+        print(f"\n[{label}] 正在获取{label}列表...")
+        data = fetcher(opener)
+        result[res] = data
+        if not output_json:
+            printer(data)
+
+    if output_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print("\n" + "=" * 70)
+        print("配置摘要")
+        print("=" * 70)
+        _print_recommendations(result)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="MonkeyCode config helper - fetch model/project/image IDs"
+        prog="monkeycode-config",
+        description="MonkeyCode 配置辅助 CLI — 获取模型/项目/镜像 ID",
     )
     parser.add_argument(
-        "resource",
-        nargs="?",
-        choices=["models", "projects", "images"],
+        "-e", "--email",
         default=None,
-        help="Query a specific resource type (default: all)",
+        help="登录邮箱（也可通过 MONKEYCODE_EMAIL 环境变量设置）",
+    )
+    parser.add_argument(
+        "-p", "--password",
+        default=None,
+        help="登录密码（也可通过 MONKEYCODE_PASSWORD 环境变量设置）",
     )
     parser.add_argument(
         "--json",
         action="store_true",
         dest="output_json",
-        help="Output in JSON format",
+        help="以 JSON 格式输出（方便脚本解析）",
     )
+
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("models", help="查询可用模型列表")
+    sub.add_parser("projects", help="查询项目列表")
+    sub.add_parser("images", help="查询开发环境镜像列表")
+    sub.add_parser("all", help="查询所有资源（默认行为）")
+
     args = parser.parse_args()
 
-    opener = get_authenticated_opener()
+    all_resources = ["models", "projects", "images"]
+    resources = all_resources if args.command in (None, "all") else [args.command]
 
-    query_all = args.resource is None
-    result: dict[str, list[dict]] = {}
+    email = args.email or os.environ.get("MONKEYCODE_EMAIL", "")
+    password = args.password or os.environ.get("MONKEYCODE_PASSWORD", "")
 
-    if query_all or args.resource == "models":
-        print("\n[Models] Fetching model list...")
-        models = fetch_models(opener)
-        result["models"] = models
-        if not args.output_json:
-            print_models(models)
+    if not email:
+        email = input("邮箱: ")
+    if not password:
+        password = getpass.getpass("密码: ")
 
-    if query_all or args.resource == "projects":
-        print("\n[Projects] Fetching project list...")
-        projects = fetch_projects(opener)
-        result["projects"] = projects
-        if not args.output_json:
-            print_projects(projects)
-
-    if query_all or args.resource == "images":
-        print("\n[Images] Fetching image list...")
-        images = fetch_images(opener)
-        result["images"] = images
-        if not args.output_json:
-            print_images(images)
-
-    if args.output_json:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-    # Print summary with recommended variable values
-    if not args.output_json:
-        print("\n" + "=" * 70)
-        print("Configuration Summary")
-        print("=" * 70)
-        _print_recommendations(result)
+    _run_query(email, password, resources, args.output_json)
 
 
 def _print_recommendations(result: dict[str, list[dict]]) -> None:
@@ -289,7 +301,7 @@ def _print_recommendations(result: dict[str, list[dict]]) -> None:
     projects = result.get("projects", [])
     images = result.get("images", [])
 
-    print("\nRecommended GitHub Actions Variables:")
+    print("\n推荐的 GitHub Actions 变量配置:")
     print("-" * 50)
 
     if models:
@@ -299,7 +311,7 @@ def _print_recommendations(result: dict[str, list[dict]]) -> None:
         print(f"  MONKEYCODE_MODEL_ID = {rec_model['id']}")
         print(f"    -> {rec_model.get('model', '?')} ({rec_model.get('provider', '?')})")
     else:
-        print("  MONKEYCODE_MODEL_ID = (no models available, please configure one first)")
+        print("  MONKEYCODE_MODEL_ID = (无可用模型，请先配置)")
 
     if images:
         default_image = next((i for i in images if i.get("is_default")), None)
@@ -307,7 +319,7 @@ def _print_recommendations(result: dict[str, list[dict]]) -> None:
         print(f"  MONKEYCODE_IMAGE_ID = {rec_image['id']}")
         print(f"    -> {rec_image.get('name', '?')}")
     else:
-        print("  MONKEYCODE_IMAGE_ID = (no images available)")
+        print("  MONKEYCODE_IMAGE_ID = (无可用镜像)")
 
     if projects:
         if len(projects) == 1:
@@ -315,9 +327,9 @@ def _print_recommendations(result: dict[str, list[dict]]) -> None:
             print(f"  MONKEYCODE_PROJECT_ID = {rec_project['id']}")
             print(f"    -> {rec_project.get('name', '?')} ({rec_project.get('repo_url', '?')})")
         else:
-            print("  MONKEYCODE_PROJECT_ID = (multiple projects found, pick one from the list above)")
+            print("  MONKEYCODE_PROJECT_ID = (存在多个项目，请从上方列表中选择)")
     else:
-        print("  MONKEYCODE_PROJECT_ID = (no projects found, please create one first)")
+        print("  MONKEYCODE_PROJECT_ID = (未找到项目，请先创建)")
 
     print()
 
