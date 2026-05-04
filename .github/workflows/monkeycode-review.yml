@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: read
-  issues: write
+  issues: read
   pull-requests: write
 
 concurrency:
@@ -93,10 +93,10 @@ jobs:
         id: find_existing_review
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           task_id="$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
               --paginate \
               --jq '[.[] | select((.body // "") | contains("[MONKEYCODE_REVIEW_TASK]")) | .body] | last // empty' \
             | grep -oP 'monkeycode-ai\.com/console/task/\K[0-9a-f-]+' \
@@ -145,33 +145,6 @@ jobs:
         run: |
           pip install --break-system-packages websocket-client
 
-      - name: 停止旧 Review 任务
-        if: >
-          steps.extract_issue.outputs.skip != 'true' &&
-          steps.check_label.outputs.has_label == 'true' &&
-          steps.find_existing_review.outputs.task_id != '' &&
-          steps.login.outputs.login_success == 'true'
-        env:
-          COOKIE_FILE: ${{ steps.login.outputs.cookie_file }}
-          TASK_ID: ${{ steps.find_existing_review.outputs.task_id }}
-        run: |
-          echo "正在停止旧 Review 任务: $TASK_ID"
-          response="$(
-            curl -sS \
-              -X PUT \
-              "https://monkeycode-ai.com/api/v1/users/tasks/stop" \
-              -H "accept: */*" \
-              -H "content-type: application/json" \
-              -b "$COOKIE_FILE" \
-              --data-raw "{\"id\":\"${TASK_ID}\"}"
-          )"
-          code="$(printf '%s' "$response" | jq -r '.code // empty' 2>/dev/null)"
-          if [ "$code" = "0" ]; then
-            echo "旧 Review 任务已成功停止"
-          else
-            echo "旧 Review 任务停止失败 (code=$code)，继续创建新任务"
-          fi
-
       - name: 尝试复用开发任务（重置上下文 + 发送 review 指令）
         if: >
           steps.extract_issue.outputs.skip != 'true' &&
@@ -209,7 +182,7 @@ jobs:
             echo "复用开发任务成功，已重置上下文并发送 review 指令"
           else
             echo "success=false" >> "$GITHUB_OUTPUT"
-            echo "复用开发任务失败（任务可能已停止或环境已回收），将回退到新建任务"
+            echo "复用开发任务失败（任务可能已停止或环境已回收），将回退到停止旧任务并新建任务"
           fi
 
       - name: 回退：创建新 MonkeyCode Review 任务
@@ -229,7 +202,26 @@ jobs:
         run: |
           set +e
 
-          echo "回退到新建 Review 任务模式"
+          if [ -n "${{ steps.find_existing_review.outputs.task_id }}" ]; then
+            echo "正在停止旧 Review 任务: ${{ steps.find_existing_review.outputs.task_id }}"
+            response="$(
+              curl -sS \
+                -X PUT \
+                "https://monkeycode-ai.com/api/v1/users/tasks/stop" \
+                -H "accept: */*" \
+                -H "content-type: application/json" \
+                -b "$COOKIE_FILE" \
+                --data-raw "{\"id\":\"${{ steps.find_existing_review.outputs.task_id }}\"}"
+            )"
+            code="$(printf '%s' "$response" | jq -r '.code // empty' 2>/dev/null)"
+            if [ "$code" = "0" ]; then
+              echo "旧 Review 任务已成功停止"
+            else
+              echo "旧 Review 任务停止失败 (code=$code)，继续创建新任务"
+            fi
+          fi
+
+          echo "回退到停止旧任务并新建 Review 任务模式"
 
           content="$(
             sed -e "s|{{PR_URL}}|${PR_URL}|g" \
@@ -283,38 +275,6 @@ jobs:
           echo "task_url=$task_url" >> "$GITHUB_OUTPUT"
           echo "task_id=$task_id" >> "$GITHUB_OUTPUT"
 
-      - name: 评论 Review 任务链接
-        if: >
-          success() &&
-          steps.extract_issue.outputs.skip != 'true' &&
-          steps.check_label.outputs.has_label == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
-          REPOSITORY: ${{ github.repository }}
-          REUSE_SUCCESS: ${{ steps.reuse_task.outputs.success }}
-          REUSE_TASK_URL: ${{ steps.reuse_task.outputs.task_url }}
-          NEW_TASK_URL: ${{ steps.create_review_task.outputs.task_url }}
-          PR_URL: ${{ steps.extract_issue.outputs.pr_url }}
-        run: |
-          if [ "$REUSE_SUCCESS" = "true" ]; then
-            task_url="$REUSE_TASK_URL"
-            mode_info="（复用开发任务环境，已重置上下文）"
-          else
-            task_url="$NEW_TASK_URL"
-            mode_info="（新建任务）"
-          fi
-
-          if [ -z "$task_url" ]; then
-            echo "无可用的任务 URL，跳过评论"
-            exit 0
-          fi
-
-          gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
-            -X POST \
-            -f body="$(printf '[MONKEYCODE_REVIEW_TASK]\n\nMonkeyCode Review 任务已创建%s\n\n- Review 任务详情：%s\n- 关联 PR：%s' \
-              "$mode_info" "$task_url" "$PR_URL")"
-
       - name: 在 PR 下确认 Review 已触发
         if: >
           success() &&
@@ -341,7 +301,7 @@ jobs:
 
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --body "$(printf 'MonkeyCode Review 任务已创建，正在进行代码审查。\n\n- %s\n- Review 任务详情：%s' \
+            --body "$(printf '[MONKEYCODE_REVIEW_TASK]\n\nMonkeyCode Review 任务已创建，正在进行代码审查。\n\n- %s\n- Review 任务详情：%s' \
               "$mode_info" "$task_url")"
 
       - name: 评论 Review 创建失败
