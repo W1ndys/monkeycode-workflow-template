@@ -61,15 +61,15 @@ jobs:
             echo "未找到开发任务 ID"
           fi
 
-      - name: 从 Issue 评论提取 Review 任务 ID
+      - name: 从 PR 评论提取 Review 任务 ID
         if: steps.extract_issue.outputs.skip != 'true'
         id: extract_review_task
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           task_id="$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
               --paginate \
               --jq '[.[] | select((.body // "") | contains("[MONKEYCODE_REVIEW_TASK]")) | .body] | last // empty' \
             | grep -oP 'monkeycode-ai\.com/console/task/\K[0-9a-f-]+' \
@@ -220,35 +220,15 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body "$(printf '%b' "$body")"
 
-      - name: 评论并关闭关联 Issue（PR 合并时）
+      - name: 关闭关联 Issue（PR 合并时）
         if: steps.extract_issue.outputs.skip != 'true' && steps.pr_state.outputs.is_merged == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" \
-            --repo "$GITHUB_REPOSITORY" \
-            --body "$(printf 'MonkeyCode 开发任务已完成，PR #%s（%s）已合并，相关任务已终止，本 Issue 自动关闭。' \
-              "$PR_NUMBER" "$PR_TITLE")"
-
           gh issue close "$ISSUE_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --reason completed
-
-      - name: 评论关联 Issue（PR 关闭未合并时）
-        if: steps.extract_issue.outputs.skip != 'true' && steps.pr_state.outputs.is_merged != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ steps.extract_issue.outputs.issue_number }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          gh issue comment "$ISSUE_NUMBER" \
-            --repo "$GITHUB_REPOSITORY" \
-            --body "$(printf 'PR #%s（%s）已关闭（未合并），关联的 MonkeyCode 开发和 Review 任务已终止。如需继续开发，请重新创建 PR 或 Issue。' \
-              "$PR_NUMBER" "$PR_TITLE")"
 
       - name: 删除关联分支
         if: steps.extract_issue.outputs.skip != 'true'

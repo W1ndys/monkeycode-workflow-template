@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  issues: write
+  issues: read
   pull-requests: write
 
 concurrency:
@@ -24,21 +24,7 @@ jobs:
       contains(github.event.comment.body, '[MONKEYCODE_TASK_COMPLETE]')
 
     steps:
-      - name: 检查是否已有待确认评论
-        id: find_existing_confirm
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-        run: |
-          exists="$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
-              --paginate \
-              --jq 'any(.[]; (.body // "") | contains("[MONKEYCODE_PENDING_REVIEW]"))'
-          )"
-          echo "exists=$exists" >> "$GITHUB_OUTPUT"
-
       - name: 从 Issue 评论提取 PR 链接
-        if: steps.find_existing_confirm.outputs.exists != 'true'
         id: extract_pr
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,8 +57,22 @@ jobs:
           pr_number="$(printf '%s' "$pr_url" | grep -oP '[0-9]+$')"
           echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
 
+      - name: 检查 PR 下是否已有待确认评论
+        if: steps.extract_pr.outputs.skip != 'true'
+        id: find_existing_confirm
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.extract_pr.outputs.pr_number }}
+        run: |
+          exists="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --paginate \
+              --jq 'any(.[]; (.body // "") | contains("[MONKEYCODE_PENDING_REVIEW]"))'
+          )"
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+
       - name: 从 Issue 评论提取开发任务 ID
-        if: steps.find_existing_confirm.outputs.exists != 'true' && steps.extract_pr.outputs.skip != 'true'
+        if: steps.extract_pr.outputs.skip != 'true' && steps.find_existing_confirm.outputs.exists != 'true'
         id: extract_dev_task
         env:
           GH_TOKEN: ${{ github.token }}
@@ -96,8 +96,8 @@ jobs:
 
       - name: 在 PR 下发表待确认评论
         if: >
-          steps.find_existing_confirm.outputs.exists != 'true' &&
-          steps.extract_pr.outputs.skip != 'true'
+          steps.extract_pr.outputs.skip != 'true' &&
+          steps.find_existing_confirm.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.extract_pr.outputs.pr_number }}
@@ -114,17 +114,3 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body "$(printf '[MONKEYCODE_PENDING_REVIEW]\n\n## MonkeyCode 开发任务已完成\n\n%s\n\n请检查 PR 中的代码改动，确认无误后通过以下任一方式触发 MonkeyCode Review：\n\n1. 在 PR 页面点击 **Approve** 审批通过\n2. 给 PR 添加 `ready-for-review` 标签' \
               "$task_info")"
-
-      - name: 在 Issue 下标记开发完成
-        if: >
-          steps.find_existing_confirm.outputs.exists != 'true' &&
-          steps.extract_pr.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          PR_URL: ${{ steps.extract_pr.outputs.pr_url }}
-        run: |
-          gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" \
-            -X POST \
-            -f body="$(printf '[MONKEYCODE_PENDING_REVIEW]\n\nMonkeyCode 开发任务已完成，等待开发者确认后触发 Review。\n\n- 关联 PR：%s\n- 请前往 PR 页面检查代码，通过 Approve 审批或添加 `ready-for-review` 标签触发 Review。' \
-              "$PR_URL")"
